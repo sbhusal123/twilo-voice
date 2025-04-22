@@ -1,5 +1,5 @@
 """
-Creating a sound wav file out of the text files
+Decoding audio chunks recieved from websockets
 """
 
 
@@ -10,15 +10,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # foo
 import json
 import base64
-import tempfile
-import io
-import subprocess
 
+# audio encodings
 import ffmpeg
 
 app = FastAPI()
 
-# initialize audio buffer
 audio_buffer = bytearray()
 
 
@@ -32,11 +29,9 @@ def save_ulaw_to_wav(audio_data: bytes, out_path: str = "test.wav") -> str:
             .run_async(pipe_stdin=True, pipe_stdout=True, pipe_stderr=True)
         )
 
-        # Write raw audio bytes to stdin
         process.stdin.write(audio_data)
         process.stdin.close()
 
-        # Wait for process to complete and capture stderr
         out, err = process.communicate()
         if process.returncode != 0:
             print("[FFmpeg Error]", err.decode())
@@ -71,7 +66,6 @@ async def handle_incoming_call(request: Request):
 async def handle_media_stream(websocket: WebSocket):
     print("Client connected")
 
-    # initialize and clear audio buffer
     global audio_buffer
     audio_buffer.clear()
 
@@ -82,22 +76,15 @@ async def handle_media_stream(websocket: WebSocket):
             data = json.loads(message)
 
             if data["event"] == "start":
-                print("Event Started...")
                 audio_buffer.clear()
 
 
             elif data["event"] == "media":
-                print("Media recieved...")
-
-                # decode base64 encoded media payload and append to buffer
                 audio_bytes = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(audio_bytes)
 
-            # on stoping / hanging call, close websocket and create a wav file
             elif data["event"] == "stop":
                 print("Strem Stopped..")
-
-                # if there is an audio buffer
                 if audio_buffer:
                     save_ulaw_to_wav(audio_buffer)
                 await websocket.close()
