@@ -32,22 +32,22 @@ Media Event
         'chunk': '1', 
         'timestamp': '9', 
         'payload': '...'
-        }, 
-        'streamSid': 'MZdc5361ff2f79c53f738cd553b7357c82'}
+    }, 
+    'streamSid': 'MZdc5361ff2f79c53f738cd553b7357c82'
+}
 ---------------------------------------------------------------------------
 
 Stop Event
 ---------------------------------------------------------------------------
 {
-    'event': 'media', 
-    'sequenceNumber': '2', 
-    'media': {
-        'track': 'inbound', 
-        'chunk': '1', 
-        'timestamp': '9', 
-        'payload': '...'
-        }, 
-        'streamSid': 'MZdc5361ff2f79c53f738cd553b7357c82'}
+    'event': 'stop', 
+    'sequenceNumber': '99', 
+    'streamSid': 'MZdc5361ff2f79c53f738cd553b7357c82', 
+    'stop': {
+        'accountSid': 'AC3425a5d9b91c5a512447d30365ef2fa0', 
+        'callSid': 'CA13a60bfd63a9f320259ace4c17a3d82e'
+    }
+}
 ---------------------------------------------------------------------------
 """
 
