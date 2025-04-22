@@ -14,3 +14,4 @@ Twilio offers programmable voice call. Under the hood it works in following step
 
 - [Creating a Wav File Out Of Audio Bytes From WebSocket](./samples/Decoding%20Audio%20Chunks/)
 
+- [Playing audio during call](./samples/)
