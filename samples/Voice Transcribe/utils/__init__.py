@@ -16,7 +16,6 @@ from pydub import AudioSegment
 from io import BytesIO
 
 
-import ollama
 import edge_tts
 import asyncio
 import base64
@@ -158,35 +157,62 @@ async def stream_tts_to_twilio(ai_reply: str, websocket, stream_sid: str):
     })
     await websocket.send_text(message)
 
-async def get_transcribed_text_from_stream(data):
-    # Decode µ-law and buffer audio
+# Globals (or class-level if you're using a class)
+speech_state = "silent"
+silence_duration_ms = 0
+silence_threshold_ms = 2000  # ms of silence to detect end of speech
+speech_buffer = bytearray()
+audio_buffer = bytearray()  # For VAD analysis only
+
+# Configuration (adjust based on your audio stream)
+sample_rate = 8000  # 8kHz for telephony
+bytes_per_sample = 2  # 16-bit audio
+duration_check_s = 0.5  # Duration of VAD chunk in seconds (200ms)
+
+# Function
+async def get_transcribed_text_from_stream(data):    
+    global speech_state, silence_duration_ms, speech_buffer, audio_buffer
+
+    # 1. Decode base64 µ-law audio payload
     pcm_bytes = base64.b64decode(data["media"]["payload"])
+
+    # 2. Add to general buffer for VAD
     audio_buffer.extend(pcm_bytes)
 
-    # Configuration
-    duration_check_s = 5  # seconds for VAD
-    whisper_window_s = 3  # seconds for Whisper
-    chunk_size = sample_rate * bytes_per_sample
+    # 3. Calculate chunk size for VAD (e.g., 200ms chunk)
+    chunk_size = int(sample_rate * bytes_per_sample * duration_check_s)
 
-    # Enough audio buffered?
-    if len(audio_buffer) < chunk_size * whisper_window_s:
+    # 4. Wait until there's enough audio to run VAD
+    if len(audio_buffer) < chunk_size:
+        print("🔴 Length of audoi bytes is not sufficient.")
         return
 
-    # Extract latest VAD window
-    latest_window = audio_buffer[-chunk_size * duration_check_s:]
-    denoised_window = remove_noise_from_pcm(latest_window)
+    # 5. Extract and denoise the latest VAD chunk
+    latest_chunk = audio_buffer[-chunk_size:]
+    denoised_chunk = remove_noise_from_pcm(latest_chunk)  # Your custom function
 
-    if has_speech(denoised_window):
-        print("✅ Speech detected. Transcribing...")
-
-        # Prepare last 5s of audio for transcription
-        to_transcribe = audio_buffer[-chunk_size * whisper_window_s:]
-        audio_buffer.clear()  # Clear buffer after use
-
-        text = transcribe_mulaw_audio(to_transcribe)
-        print(f"📝 Transcript: {text}")
-
-        return text
-            
+    # 6. Run VAD
+    if has_speech(denoised_chunk):  # Your custom or WebRTC VAD-based function
+        if speech_state == "silent":
+            print("🟢 Start of speech detected.")
+            speech_state = "speaking"
+            speech_buffer = bytearray()  # Clear previous buffer
+        silence_duration_ms = 0
+        speech_buffer.extend(pcm_bytes)  # Append the current chunk
     else:
-        return ""
+        if speech_state == "speaking":
+            silence_duration_ms += duration_check_s * 1000
+            if silence_duration_ms >= silence_threshold_ms:
+                print("🔴 End of speech detected.")
+                speech_state = "silent"
+                silence_duration_ms = 0
+
+                # Transcribe the complete speech segment
+                to_transcribe = bytes(speech_buffer)
+                speech_buffer.clear()
+
+                text = transcribe_mulaw_audio(to_transcribe)  # Your custom function
+                print(f"📝 Transcript: {text}")
+                return text
+
+    return ""
