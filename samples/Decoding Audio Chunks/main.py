@@ -87,6 +87,8 @@ async def handle_media_stream(websocket: WebSocket):
                 print("Strem Stopped..")
                 if audio_buffer:
                     save_ulaw_to_wav(audio_buffer)
+                    with open('raw_file.raw', 'wb') as file:
+                        file.write(audio_buffer)
                 await websocket.close()
 
     except Exception as e:

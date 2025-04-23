@@ -4,3 +4,14 @@ websockets==15.0.1
 pydub==0.25.1
 ffmpeg-python==0.2.0
 pydub==0.25.1
+
+
+webrtcvad==2.0.10
+numpy==2.2.5
+PyAudio==0.2.14
+numpy==2.2.5
+git+https://github.com/openai/whisper.git
+librosa==0.11.0
+uvicorn
+ollama==0.4.8
+edge-tts==7.0.1
