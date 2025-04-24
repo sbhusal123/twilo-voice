@@ -8,6 +8,8 @@ Twilio offers programmable voice call. Under the hood it works in following step
 - Then, a websocket connection is established. Websocket object consists of media payload consisting of audio bytes. 
 
 
+[Twilio Docs](https://www.twilio.com/docs/voice/media-streams/websocket-messages)
+
 ## Table Of Contents:
 
 - [Understanding WebSocket Events](./samples/Socket%20Events/)

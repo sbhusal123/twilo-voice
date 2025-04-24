@@ -1,6 +1,4 @@
 import webrtcvad
-import numpy as np
-import struct
 
 # Initialize WebRTC VAD with aggressiveness level 3 (most aggressive)
 vad = webrtcvad.Vad(3)
@@ -12,19 +10,8 @@ FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)  # Number of samples pe
 
 # Function to convert mu-law to PCM
 def mu_law_to_pcm(mu_law_bytes):
-    pcm_samples = np.array([mu_law_to_pcm_sample(byte) for byte in mu_law_bytes], dtype=np.int16)
-    return pcm_samples
-
-# Mu-law to PCM conversion for a single byte
-def mu_law_to_pcm_sample(mu_law_byte):
-    mu_law_max = 255
-    mu_law_offset = 0x84
-    sign = 1 if (mu_law_byte & 0x80) == 0 else -1
-    mu_law_byte = mu_law_byte & mu_law_max
-    mu_law_byte -= mu_law_offset
-    mu_law_byte = (mu_law_byte & 0x0F) << 3
-    pcm_value = sign * mu_law_byte
-    return pcm_value
+    pcm_bytes = audioop.ulaw2lin(mu_law_bytes, 2)
+    return pcm_bytes
 
 # Function to detect speech and process audio chunks
 def detect_speech_in_encoded_audio(audio_chunk):
