@@ -172,12 +172,14 @@ async def handle_media_stream(websocket: WebSocket):
     audio_bytes = bytearray()
     vad_audio_bytes = bytearray()
 
-    speech_pause_seconds = 0
+    
+    speech_pause_seconds = 3
 
     vad_start_timestamp = 0
     vad_end_timestamp = 0
+    vad_audio_length_ms = 500
 
-    # message history to be accessed by model
+    
     message_history = []
 
     try:
@@ -200,7 +202,7 @@ async def handle_media_stream(websocket: WebSocket):
                 is_audio = False
 
                 # process every 500ms chunk to check if voice is present
-                if vad_end_timestamp - vad_start_timestamp >= 500:
+                if vad_end_timestamp - vad_start_timestamp >= vad_audio_length_ms:
                     pcm_bytes = audioop.ulaw2lin(vad_audio_bytes, 2)
                     speech_timestamps = get_speech_timestamps(
                         pcm_bytes_to_tensor(pcm_bytes),
@@ -224,10 +226,11 @@ async def handle_media_stream(websocket: WebSocket):
                 if is_audio:
                     speech_pause_seconds = 0
                 else:
+                    # note that: twilio sends us back with 20ms audio
                     speech_pause_seconds += 20/1000
                 
 
-                if speech_pause_seconds >= 3:
+                if speech_pause_seconds >= speech_pause_seconds:
                     print("Speech paused for 2 seconds.")
                     speech_pause_seconds = 0
                     
