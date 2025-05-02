@@ -121,10 +121,22 @@ asr_pipeline = pipeline(
     device=0 if device == "cuda" else -1,
 )
 
+system_prompt = """
+You are a highly knowledgeable AI assistant. Always answer clearly, confidently, and naturally,
+but keep your response short and meaningful. Do not list points or use bullet forms.
+
+Your answers will be converted to speech, so use proper punctuation like commas, periods, and question marks.
+Avoid long sentences or excessive detail. Speak in a natural, conversational tone.
+Limit your response to 1–2 short sentences only.
+
+If you dont know anything, respond im unsure about that.
+"""
+
+
 async def call_ollama_chat_llama3(messages: str) -> str:
     msg = [{
         'role': 'system',
-        'content': 'You are a helpful assistant.'
+        'content': system_prompt
     }]
     
     msg.extend(messages)
@@ -133,7 +145,8 @@ async def call_ollama_chat_llama3(messages: str) -> str:
     response = await ollama.AsyncClient().chat(
         model='llama3:8b',
         messages=msg,
-        stream=False
+        stream=False,
+        options={"temperature": 0.1}
     )
 
     return response['message']['content']
@@ -173,7 +186,8 @@ async def handle_media_stream(websocket: WebSocket):
     vad_audio_bytes = bytearray()
 
     
-    speech_pause_seconds = 3
+    speech_pause_seconds_threshold = 2
+    speech_pause_seconds = 0
 
     vad_start_timestamp = 0
     vad_end_timestamp = 0
@@ -207,7 +221,7 @@ async def handle_media_stream(websocket: WebSocket):
                     speech_timestamps = get_speech_timestamps(
                         pcm_bytes_to_tensor(pcm_bytes),
                         vad_model,
-                        return_seconds=True,  # Return speech timestamps in seconds (default is samples)
+                        return_seconds=True,
                     )
 
                     print("speech_timestamps::", speech_timestamps)
@@ -230,7 +244,7 @@ async def handle_media_stream(websocket: WebSocket):
                     speech_pause_seconds += 20/1000
                 
 
-                if speech_pause_seconds >= speech_pause_seconds:
+                if speech_pause_seconds >= speech_pause_seconds_threshold:
                     print("Speech paused for 2 seconds.")
                     speech_pause_seconds = 0
                     
@@ -238,7 +252,7 @@ async def handle_media_stream(websocket: WebSocket):
                     speech_timestamps = get_speech_timestamps(
                         pcm_bytes_to_tensor(pcm_bytes),
                         vad_model,
-                        return_seconds=True,  # Return speech timestamps in seconds (default is samples)
+                        return_seconds=True,
                     )
 
                     if speech_timestamps:
@@ -247,24 +261,27 @@ async def handle_media_stream(websocket: WebSocket):
                         transcribed_text = transcribe_pcm_ulaw(audio_bytes)
                         audio_bytes.clear()
 
-                        message_history.append({
-                            "role": "user", "content": transcribed_text
-                        })        
+                        print("Transcribed Text=>", transcribed_text)
 
-                        # now call ollama model from here
-                        text = await call_ollama_chat_llama3(message_history)
+                        if transcribed_text:
+                            message_history.append({
+                                "role": "user", "content": transcribed_text
+                            })
 
-                        message_history.append({
-                            "role": "assistant", "content": text
-                        })
+                            # now call ollama model from here
+                            text = await call_ollama_chat_llama3(message_history)
+            
+                            message_history.append({
+                                "role": "assistant", "content": text
+                            })
 
-                        await stream_tts_to_twilio(
-                            ai_reply=text,
-                            websocket=websocket,
-                            stream_sid=data["streamSid"]
-                        )
+                            await stream_tts_to_twilio(
+                                ai_reply=text,
+                                websocket=websocket,
+                                stream_sid=data["streamSid"]
+                            )
 
-                        print("Response:::", text)
+                            print("Response:::", text)
                     else:
                         print("No audio to process")
 
