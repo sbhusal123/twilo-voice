@@ -5,24 +5,46 @@ import json
 import traceback
 import base64
 import audioop
+import torch
+import numpy as np
 
 
 from silero_vad import load_silero_vad,  get_speech_timestamps
 
-vad_model = load_silero_vad()
-
-import torch
-import numpy as np
 
 import torchaudio.transforms as T
 
+from transformers import pipeline, WhisperProcessor, WhisperForConditionalGeneration
+import torch
+
 resampler = T.Resample(orig_freq=8000, new_freq=16000)
+
+vad_model = load_silero_vad()
 
 
 def pcm_bytes_to_tensor(pcm_bytes):
     np_array = np.frombuffer(pcm_bytes, dtype=np.int16)
     waveform =  torch.tensor(np_array, dtype=torch.float32).unsqueeze(0) / 32768.0
     return resampler(waveform)
+
+def transcribe_pcm_ulaw(pcm_ulaw_bytes):
+    pcm_bytes = audioop.ulaw2lin(pcm_ulaw_bytes, 2)
+    waveform = pcm_bytes_to_tensor(pcm_bytes)  # float32, [1, N], 16kHz
+    result = asr_pipeline(waveform.squeeze(0).numpy(), chunk_length_s=10)
+    return result["text"]
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small").to(device)
+
+
+asr_pipeline = pipeline(
+    "automatic-speech-recognition",
+    model=model,
+    tokenizer=processor.tokenizer,
+    feature_extractor=processor.feature_extractor,
+    device=0 if device == "cuda" else -1,
+)
 
 
 
@@ -123,7 +145,12 @@ async def handle_media_stream(websocket: WebSocket):
                     )
 
                     if speech_timestamps:
-                        print("Yes audio found..")
+                        print("Yes audio found..")                        
+
+                        result = transcribe_pcm_ulaw(audio_bytes)
+
+                        print("Transcribed text = ", result)
+
                         audio_bytes.clear()
                     else:
                         print("No audio to process")
