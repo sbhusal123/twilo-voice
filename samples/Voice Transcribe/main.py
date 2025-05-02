@@ -158,7 +158,7 @@ but keep your response short and meaningful. Do not list points or use bullet fo
 
 Your answers will be converted to speech, so use proper punctuation like commas, periods, and question marks.
 Avoid long sentences or excessive detail. Speak in a natural, conversational tone.
-Limit your response to 1–2 short sentences only.
+Limit your response to 1–2 short sentences only. Do not make sentences longer.
 
 If you dont know anything, respond im unsure about that.
 """
@@ -220,7 +220,7 @@ async def handle_media_stream(websocket: WebSocket):
     vad_audio_bytes = bytearray()
 
     
-    speech_pause_seconds_threshold = 2
+    speech_pause_seconds_threshold = 3
     speech_pause_seconds = 0
 
     vad_start_timestamp = 0
@@ -251,6 +251,8 @@ async def handle_media_stream(websocket: WebSocket):
 
                 # process every 500ms chunk to check if voice is present
                 if vad_end_timestamp - vad_start_timestamp >= vad_audio_length_ms:
+
+                    diff = vad_end_timestamp - vad_start_timestamp
                     pcm_bytes = audioop.ulaw2lin(vad_audio_bytes, 2)
                     speech_timestamps = get_speech_timestamps(
                         pcm_bytes_to_tensor(pcm_bytes),
@@ -262,20 +264,12 @@ async def handle_media_stream(websocket: WebSocket):
 
                     
                     if speech_timestamps:
-                        is_audio = True
                         speech_pause_seconds = 0
                     else:
-                        is_audio = False
-                        speech_pause_seconds += 20/1000
+                        speech_pause_seconds += diff/1000
 
                     vad_audio_bytes.clear()
                     vad_start_timestamp = vad_end_timestamp
-
-                if is_audio:
-                    speech_pause_seconds = 0
-                else:
-                    # note that: twilio sends us back with 20ms audio
-                    speech_pause_seconds += 20/1000
                 
 
                 if speech_pause_seconds >= speech_pause_seconds_threshold:
