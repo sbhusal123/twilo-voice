@@ -45,7 +45,7 @@ def is_complete_sentence(text):
     sentences = sent_tokenize(text)
 
     if len(sentences) != 1:
-        return False  # More than one sentence, not suitable
+        return False
 
     sentence = sentences[0]
     words = word_tokenize(sentence)
@@ -106,25 +106,21 @@ async def stream_tts_to_twilio(ai_reply: str, websocket, stream_sid: str):
     communicate = edge_tts.Communicate(text=ai_reply, voice="en-US-GuyNeural")
     audio_chunks = []
 
-    # Collect TTS MP3 data
+
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             audio_chunks.append(chunk["data"])
     
     mp3_data = b"".join(audio_chunks)
 
-    # Convert MP3 to 8kHz mono PCM (16-bit)
+
     audio = AudioSegment.from_file(BytesIO(mp3_data), format="mp3") \
                        .set_frame_rate(SAMPLE_RATE) \
                        .set_channels(1) \
-                       .set_sample_width(2)  # 16-bit linear PCM
+                       .set_sample_width(2)
 
     raw_pcm = audio.raw_data
-
-    # Convert to µ-law (1 byte per sample)
-    mulaw_pcm = audioop.lin2ulaw(raw_pcm, 2)  # 2 bytes = 16-bit input
-
-    # Calculate chunk size in bytes for 20 ms at 8kHz and 1 byte/sample
+    mulaw_pcm = audioop.lin2ulaw(raw_pcm, 2)
     bytes_per_chunk = int(SAMPLE_RATE * CHUNK_MS / 1000 * BYTES_PER_SAMPLE)
 
     # Send in chunks
@@ -220,7 +216,7 @@ async def handle_media_stream(websocket: WebSocket):
     vad_audio_bytes = bytearray()
 
     
-    speech_pause_seconds_threshold = 3
+    speech_pause_seconds_threshold = 2
     speech_pause_seconds = 0
 
     vad_start_timestamp = 0
@@ -246,8 +242,6 @@ async def handle_media_stream(websocket: WebSocket):
                 audio_bytes.extend(payload)
                 
                 vad_end_timestamp = int(data["media"]["timestamp"])
-
-                is_audio = False
 
                 # process every 500ms chunk to check if voice is present
                 if vad_end_timestamp - vad_start_timestamp >= vad_audio_length_ms:
