@@ -1,39 +1,33 @@
-import json
-import traceback
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 
-from utils import get_transcribed_text_from_stream, \
-    stream_tts_to_twilio, reset_audio_buffer
-
-import ollama
-
-import audioop
-from pydub import AudioSegment
+import json
+import traceback
 import base64
+import audioop
+
+
+from silero_vad import load_silero_vad,  get_speech_timestamps
+
+vad_model = load_silero_vad()
+
+import torch
+import numpy as np
+
+import torchaudio.transforms as T
+
+resampler = T.Resample(orig_freq=8000, new_freq=16000)
+
+
+def pcm_bytes_to_tensor(pcm_bytes):
+    np_array = np.frombuffer(pcm_bytes, dtype=np.int16)
+    waveform =  torch.tensor(np_array, dtype=torch.float32).unsqueeze(0) / 32768.0
+    return resampler(waveform)
+
+
 
 # Initialize FastAPI
 app = FastAPI()
-
-def mp3_to_mulaw_b64(path: str) -> str:
-    """
-    Read an MP3 file, convert it to 8kHz mono μ‑law, and return
-    a base64-encoded payload (no headers).
-    """
-    # 1. Decode MP3 and normalize to 8kHz mono, 16-bit PCM
-    audio = AudioSegment.from_file(path) \
-                        .set_frame_rate(8000) \
-                        .set_channels(1) \
-                        .set_sample_width(2)
-
-    # 2. Extract raw 16-bit PCM data
-    raw_pcm = audio.raw_data
-
-    # 3. μ‑law encode (audioop.lin2ulaw expects sample_width=2 for 16-bit)
-    mulaw_pcm = audioop.lin2ulaw(raw_pcm, audio.sample_width)
-
-    # 4. Base64 encode and return ASCII string
-    return base64.b64encode(mulaw_pcm).decode('ascii')
 
 @app.get("/", response_class=JSONResponse)
 async def index_page():
@@ -47,9 +41,7 @@ async def handle_incoming_call(request: Request):
     from twilio.twiml.voice_response import VoiceResponse, Connect
 
     response = VoiceResponse()
-    response.say("Please wait, connecting to the AI voice assistant.")
-    response.pause(1)
-    response.say("You are now connected to AI assiatant. You can start speaking after the ring")
+    response.say("Connected to voice assistant, start speaking after the ring.")
     host = request.url.hostname
     connect = Connect()
     connect.stream(url=f"wss://{host}/media-stream")
@@ -57,32 +49,20 @@ async def handle_incoming_call(request: Request):
     return HTMLResponse(content=str(response), media_type="application/xml")
 
 
-async def play_sound_file(file_path, data, websocket):
-    stream_sid = data["streamSid"]
-    b64_payload = mp3_to_mulaw_b64(file_path)
-
-    dt = json.dumps({
-        "event": "media",
-        "streamSid": stream_sid,
-        "media": {
-            "payload": b64_payload
-        }
-    })
-
-    await websocket.send_text(dt)
-
-
-import asyncio
-lock = asyncio.Lock()
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
     """
     Accepts Twilio Media Stream messages, decodes µ-law to PCM,
     applies noise reduction, VAD, and transcribes with Whisper.
     """
-    reset_audio_buffer()
     await websocket.accept()
+    audio_bytes = bytearray()
+    vad_audio_bytes = bytearray()
 
+    speech_pause_seconds = 0
+
+    vad_start_timestamp = 0
+    vad_end_timestamp = 0
 
     try:
         async for message in websocket.iter_text():
@@ -90,38 +70,70 @@ async def handle_media_stream(websocket: WebSocket):
             event = data.get("event")
 
             if event == "start":
-                print("🚀 Stream started")
-                reset_audio_buffer()
+                pass
 
             elif event == "media":
-                text = await get_transcribed_text_from_stream(data)
-                # if there is a text
-                if text:
-                    ai_response = ollama.chat(
-                        model='llama3:8b',
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": "You are a super smart voice call assistant"
-                                " You will be given a text from the audio of what user said."
-                                " Your response text will be converted into audio, so you need "
-                                "to make sure number of words in your response is not more than 15 words."
-                                "Do not make up anything, just answer the users answer in 15-20 words."
-                            },
-                            {
-                                "role": "user",
-                                "content": text
-                            }
-                        ]
+                payload = data["media"]["payload"]
+                payload = base64.b64decode(payload)
+
+                vad_audio_bytes.extend(payload)
+                audio_bytes.extend(payload)
+                
+                vad_end_timestamp = int(data["media"]["timestamp"])
+
+                is_audio = False
+
+                # process every 500ms chunk to check if voice is present
+                if vad_end_timestamp - vad_start_timestamp >= 500:
+                    pcm_bytes = audioop.ulaw2lin(vad_audio_bytes, 2)
+                    speech_timestamps = get_speech_timestamps(
+                        pcm_bytes_to_tensor(pcm_bytes),
+                        vad_model,
+                        return_seconds=True,  # Return speech timestamps in seconds (default is samples)
                     )
-                    await stream_tts_to_twilio(
-                        ai_reply=ai_response["message"]["content"],
-                        websocket=websocket,
-                        stream_sid=data["streamSid"]
-                    )                
+
+                    print("speech_timestamps::", speech_timestamps)
+
+                    
+                    if speech_timestamps:
+                        is_audio = True
+                        speech_pause_seconds = 0
+                    else:
+                        is_audio = False
+                        speech_pause_seconds += 20/1000
+
+                    vad_audio_bytes.clear()
+                    vad_start_timestamp = vad_end_timestamp
+
+                if is_audio:
+                    speech_pause_seconds = 0
+                else:
+                    speech_pause_seconds += 20/1000
+                
+
+                if speech_pause_seconds >= 2:
+                    print("Speech paused for 2 seconds.")
+                    speech_pause_seconds = 0
+                    
+                    pcm_bytes = audioop.ulaw2lin(audio_bytes, 2)
+                    speech_timestamps = get_speech_timestamps(
+                        pcm_bytes_to_tensor(pcm_bytes),
+                        vad_model,
+                        return_seconds=True,  # Return speech timestamps in seconds (default is samples)
+                    )
+
+                    if speech_timestamps:
+                        print("Yes audio found..")
+                        audio_bytes.clear()
+                    else:
+                        print("No audio to process")
+
+
+
+                    
+
 
             elif event == "stop":
-                print("🛑 Stream stopped by Twilio")
                 await websocket.close()
 
     except Exception as exc:
