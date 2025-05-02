@@ -12,15 +12,59 @@ import numpy as np
 from silero_vad import load_silero_vad,  get_speech_timestamps
 
 
-import torchaudio.transforms as T
+import torchaudio
 
 from transformers import pipeline, WhisperProcessor, WhisperForConditionalGeneration
 import torch
 
-resampler = T.Resample(orig_freq=8000, new_freq=16000)
+from pydub import AudioSegment
+from io import BytesIO
+
+import edge_tts
+import io
+
+import wave
+
+import ollama
+
+
+resampler = torchaudio.transforms.Resample(orig_freq=8000, new_freq=16000)
 
 vad_model = load_silero_vad()
 
+
+async def text_to_pcm_bytes(text: str) -> bytes:
+    tts = edge_tts.Communicate(text, voice="en-US-JennyNeural")
+    pcm_data = bytearray()
+
+    async for chunk in tts.stream():
+        if chunk["type"] == "audio":
+            pcm_data.extend(chunk["data"])
+
+    return bytes(pcm_data)
+
+
+def pcm16_to_mulaw(pcm_bytes: bytes, sample_rate=16000) -> bytes:
+    # 1. Wrap PCM bytes into WAV format in-memory
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    buffer.seek(0)
+
+    # 2. Load WAV from buffer
+    waveform, _ = torchaudio.load(buffer)
+
+    # 3. Resample to 8000 Hz
+    resampled = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=8000)(waveform)
+
+    # 4. Convert to int16 PCM
+    int16_pcm = (resampled.squeeze().numpy() * 32768).astype(np.int16).tobytes()
+
+    # 5. Encode to μ-law
+    return audioop.lin2ulaw(int16_pcm, 2)
 
 def pcm_bytes_to_tensor(pcm_bytes):
     np_array = np.frombuffer(pcm_bytes, dtype=np.int16)
@@ -32,6 +76,37 @@ def transcribe_pcm_ulaw(pcm_ulaw_bytes):
     waveform = pcm_bytes_to_tensor(pcm_bytes)  # float32, [1, N], 16kHz
     result = asr_pipeline(waveform.squeeze(0).numpy(), chunk_length_s=10)
     return result["text"]
+
+
+async def stream_tts_to_twilio(ai_reply: str, websocket, stream_sid: str):
+    communicate = edge_tts.Communicate(text=ai_reply, voice="en-US-GuyNeural")
+    audio_chunks = []
+
+    # Collect TTS MP3 data
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_chunks.append(chunk["data"])
+    
+    mp3_data = b"".join(audio_chunks)
+
+    # Convert MP3 to 8kHz µ-law PCM using pydub
+    audio = AudioSegment.from_file(BytesIO(mp3_data), format="mp3") \
+                       .set_frame_rate(8000) \
+                       .set_channels(1) \
+                       .set_sample_width(2)
+
+    raw_pcm = audio.raw_data
+
+    mulaw_pcm = audioop.lin2ulaw(raw_pcm, audio.sample_width)
+
+    
+    payload = base64.b64encode(mulaw_pcm).decode('ascii')
+    message = json.dumps({
+            "event": "media",
+            "streamSid": stream_sid,
+            "media": {"payload": payload}
+    })
+    await websocket.send_text(message)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 processor = WhisperProcessor.from_pretrained("openai/whisper-small")
@@ -46,6 +121,22 @@ asr_pipeline = pipeline(
     device=0 if device == "cuda" else -1,
 )
 
+async def call_ollama_chat_llama3(messages: str) -> str:
+    msg = [{
+        'role': 'system',
+        'content': 'You are a helpful assistant.'
+    }]
+    
+    msg.extend(messages)
+
+    # Send to Ollama with llama3 or any other model you have
+    response = await ollama.AsyncClient().chat(
+        model='llama3:8b',
+        messages=msg,
+        stream=False
+    )
+
+    return response['message']['content']
 
 
 # Initialize FastAPI
@@ -85,6 +176,9 @@ async def handle_media_stream(websocket: WebSocket):
 
     vad_start_timestamp = 0
     vad_end_timestamp = 0
+
+    # message history to be accessed by model
+    message_history = []
 
     try:
         async for message in websocket.iter_text():
@@ -133,7 +227,7 @@ async def handle_media_stream(websocket: WebSocket):
                     speech_pause_seconds += 20/1000
                 
 
-                if speech_pause_seconds >= 2:
+                if speech_pause_seconds >= 3:
                     print("Speech paused for 2 seconds.")
                     speech_pause_seconds = 0
                     
@@ -145,20 +239,31 @@ async def handle_media_stream(websocket: WebSocket):
                     )
 
                     if speech_timestamps:
-                        print("Yes audio found..")                        
+                        print("Yes audio found..")
 
-                        result = transcribe_pcm_ulaw(audio_bytes)
-
-                        print("Transcribed text = ", result)
-
+                        transcribed_text = transcribe_pcm_ulaw(audio_bytes)
                         audio_bytes.clear()
+
+                        message_history.append({
+                            "role": "user", "content": transcribed_text
+                        })        
+
+                        # now call ollama model from here
+                        text = await call_ollama_chat_llama3(message_history)
+
+                        message_history.append({
+                            "role": "assistant", "content": text
+                        })
+
+                        await stream_tts_to_twilio(
+                            ai_reply=text,
+                            websocket=websocket,
+                            stream_sid=data["streamSid"]
+                        )
+
+                        print("Response:::", text)
                     else:
                         print("No audio to process")
-
-
-
-                    
-
 
             elif event == "stop":
                 await websocket.close()
