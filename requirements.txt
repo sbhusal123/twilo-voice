@@ -15,3 +15,4 @@ librosa==0.11.0
 uvicorn
 ollama==0.4.8
 edge-tts==7.0.1
+nltk==3.9.1

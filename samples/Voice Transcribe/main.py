@@ -7,6 +7,7 @@ import base64
 import audioop
 import torch
 import numpy as np
+import time
 
 
 from silero_vad import load_silero_vad,  get_speech_timestamps
@@ -27,10 +28,30 @@ import wave
 
 import ollama
 
+import nltk
+from nltk.tokenize import sent_tokenize, word_tokenize
+
+nltk.download('punkt_tab')
+
+
+
 
 resampler = torchaudio.transforms.Resample(orig_freq=8000, new_freq=16000)
 
 vad_model = load_silero_vad()
+
+def is_complete_sentence(text):
+    text = text.strip()
+    sentences = sent_tokenize(text)
+
+    if len(sentences) != 1:
+        return False  # More than one sentence, not suitable
+
+    sentence = sentences[0]
+    words = word_tokenize(sentence)
+
+    # Return True only if ends with punctuation and has >1 word
+    return sentence.endswith(('.', '!', '?')) and len([w for w in words if w.isalnum()]) > 1
 
 
 async def text_to_pcm_bytes(text: str) -> bytes:
@@ -79,6 +100,9 @@ def transcribe_pcm_ulaw(pcm_ulaw_bytes):
 
 
 async def stream_tts_to_twilio(ai_reply: str, websocket, stream_sid: str):
+    CHUNK_MS = 10  # 20 milliseconds
+    SAMPLE_RATE = 8000  # 8kHz
+    BYTES_PER_SAMPLE = 1  # µ-law = 8 bits = 1 byte
     communicate = edge_tts.Communicate(text=ai_reply, voice="en-US-GuyNeural")
     audio_chunks = []
 
@@ -89,24 +113,31 @@ async def stream_tts_to_twilio(ai_reply: str, websocket, stream_sid: str):
     
     mp3_data = b"".join(audio_chunks)
 
-    # Convert MP3 to 8kHz µ-law PCM using pydub
+    # Convert MP3 to 8kHz mono PCM (16-bit)
     audio = AudioSegment.from_file(BytesIO(mp3_data), format="mp3") \
-                       .set_frame_rate(8000) \
+                       .set_frame_rate(SAMPLE_RATE) \
                        .set_channels(1) \
-                       .set_sample_width(2)
+                       .set_sample_width(2)  # 16-bit linear PCM
 
     raw_pcm = audio.raw_data
 
-    mulaw_pcm = audioop.lin2ulaw(raw_pcm, audio.sample_width)
+    # Convert to µ-law (1 byte per sample)
+    mulaw_pcm = audioop.lin2ulaw(raw_pcm, 2)  # 2 bytes = 16-bit input
 
-    
-    payload = base64.b64encode(mulaw_pcm).decode('ascii')
-    message = json.dumps({
+    # Calculate chunk size in bytes for 20 ms at 8kHz and 1 byte/sample
+    bytes_per_chunk = int(SAMPLE_RATE * CHUNK_MS / 1000 * BYTES_PER_SAMPLE)
+
+    # Send in chunks
+    for i in range(0, len(mulaw_pcm), bytes_per_chunk):
+        chunk = mulaw_pcm[i:i + bytes_per_chunk]
+        payload = base64.b64encode(chunk).decode("ascii")
+
+        message = json.dumps({
             "event": "media",
             "streamSid": stream_sid,
             "media": {"payload": payload}
-    })
-    await websocket.send_text(message)
+        })
+        await websocket.send_text(message)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 processor = WhisperProcessor.from_pretrained("openai/whisper-small")
@@ -133,7 +164,7 @@ If you dont know anything, respond im unsure about that.
 """
 
 
-async def call_ollama_chat_llama3(messages: str) -> str:
+async def call_ollama_chat_llama3(messages: list):
     msg = [{
         'role': 'system',
         'content': system_prompt
@@ -141,15 +172,18 @@ async def call_ollama_chat_llama3(messages: str) -> str:
     
     msg.extend(messages)
 
-    # Send to Ollama with llama3 or any other model you have
-    response = await ollama.AsyncClient().chat(
+    # Enable streaming
+    response_stream = await ollama.AsyncClient().chat(
         model='llama3:8b',
         messages=msg,
-        stream=False,
+        stream=True,
         options={"temperature": 0.1}
     )
 
-    return response['message']['content']
+    # Stream each chunk
+    async for chunk in response_stream:
+        if 'message' in chunk and 'content' in chunk['message']:
+            yield chunk['message']['content']
 
 
 # Initialize FastAPI
@@ -255,10 +289,14 @@ async def handle_media_stream(websocket: WebSocket):
                         return_seconds=True,
                     )
 
+                    # if there is speech in audio process buffer
                     if speech_timestamps:
                         print("Yes audio found..")
 
+                        start = time.time()
                         transcribed_text = transcribe_pcm_ulaw(audio_bytes)
+                        end = time.time()
+                        print(f"Text transcribe took: {end-start:5f} seconds")
                         audio_bytes.clear()
 
                         print("Transcribed Text=>", transcribed_text)
@@ -268,20 +306,32 @@ async def handle_media_stream(websocket: WebSocket):
                                 "role": "user", "content": transcribed_text
                             })
 
-                            # now call ollama model from here
-                            text = await call_ollama_chat_llama3(message_history)
-            
+                            start = time.time()
+
+                            full_response = ""
+                            buffer = ""
+
+                            
+                            async for part in call_ollama_chat_llama3(message_history):
+                                print("Part::", part)
+
+                                buffer += part
+                                full_response += part
+
+                                if is_complete_sentence(buffer):
+                                    await stream_tts_to_twilio(
+                                        ai_reply=buffer,
+                                        websocket=websocket,
+                                        stream_sid=data["streamSid"]
+                                    )
+                                    buffer = ""
+
+                                
                             message_history.append({
-                                "role": "assistant", "content": text
+                                "role": "assistant", "content": full_response
                             })
 
-                            await stream_tts_to_twilio(
-                                ai_reply=text,
-                                websocket=websocket,
-                                stream_sid=data["streamSid"]
-                            )
-
-                            print("Response:::", text)
+                            print("Response:::", full_response)
                     else:
                         print("No audio to process")
 
